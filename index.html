@@ -633,6 +633,11 @@ function refreshLocation() {
   checkReady();
   setOriginStatus('locating', 'Locating you...');
   getGPSLocation();
+  // Also refresh nearby buses if the sheet has been opened before
+  if (nearbyLoaded) {
+    nearbyLoaded = false;
+    loadNearbyBuses();
+  }
 }
 
 function getGPSLocation() {
@@ -925,6 +930,7 @@ async function refineWithOSRM(cards) {
         c.steps[0].dur = rF + 'min';
         c.steps[0].warn = km > 1.5 ? 'On foot this would take ~' + wF + ' min' : null;
         c._boardGeometry = real.geometry;
+        if (c.steps[0]) c.steps[0]._geometry = real.geometry;
         totalRideMin += rF;
         anyUpdated = true;
       }
@@ -939,6 +945,7 @@ async function refineWithOSRM(cards) {
         lastStep.dur = rT + 'min';
         lastStep.warn = km > 1.5 ? 'On foot this would take ~' + wT + ' min' : null;
         c._alightGeometry = real.geometry;
+        if (c.steps[c.steps.length-1]) c.steps[c.steps.length-1]._geometry = real.geometry;
         totalRideMin += rT;
         anyUpdated = true;
       }
@@ -959,6 +966,16 @@ async function refineWithOSRM(cards) {
     document.getElementById('results').innerHTML =
       '<div class="res-label">'+plannedCards.length+' options &bull; <span style="color:#1D9E75;font-size:10px">&#x2714; real street distances</span></div>'+
       plannedCards.map(renderCard).join('');
+
+    // If map is open showing one of the updated cards, redraw with real geometry
+    if (activeCard && !document.getElementById('map-overlay').classList.contains('hidden')) {
+      const updated = plannedCards.find(c => c.id === activeCard.id);
+      if (updated && (updated._boardGeometry || updated._alightGeometry || updated._rideGeometry)) {
+        activeCard = updated;
+        clearMapLayers();
+        drawRouteOnMap(updated);
+      }
+    }
   }
 }
 
@@ -1001,15 +1018,19 @@ function planRoute(){
         ].filter(Boolean),
         steps: [
           {ic:'&#x1F6B2;',bg:'#E1F5EE',
+            type:'ride', targetLat:boardStop.la, targetLon:boardStop.lo, thresholdM:60,
             title:'Ride '+dkm(r.rdBoard)+' to '+boardStop.n,
             detail:rF+' min on '+curV+(r.rdBoard>0.8?' — would take '+wF+' min on foot':''),
             dur:rF+'min',
             warn:r.rdBoard>1.5?'Walking this would take ~'+wF+' min — wheels make a big difference here':null},
           {ic:'&#x1F68C;',bg:'#E6F1FB',
+            type:'bus', targetLat:alightStop.la, targetLon:alightStop.lo, thresholdM:80, speedTrigger:true,
+            busRoute:r.route.short, busStops:r.stops,
             title:'Board Route '+r.route.short+' — '+r.route.long,
             detail:r.transitMins+' min · '+r.stops+' stops',
             dur:r.transitMins+'min'},
           {ic:'&#x1F6B2;',bg:'#E1F5EE',
+            type:'ride', targetLat:locTo.lat, targetLon:locTo.lon, thresholdM:50,
             title:'Ride '+dkm(r.rdAlight)+' to destination from '+alightStop.n,
             detail:rT+' min on '+curV+(r.rdAlight>0.8?' — would take '+wT+' min on foot':''),
             dur:rT+'min',
@@ -1047,22 +1068,29 @@ function planRoute(){
         ],
         steps: [
           {ic:'&#x1F6B2;',bg:'#E1F5EE',
+            type:'ride', targetLat:boardStop.la, targetLon:boardStop.lo, thresholdM:60,
             title:'Ride '+dkm(r.rdBoard)+' to '+boardStop.n,
             detail:rF+' min on '+curV+(r.rdBoard>0.8?' — '+wF+' min on foot':''),
             dur:rF+'min',warn:r.rdBoard>1.5?'On foot: ~'+wF+' min':null},
           {ic:'&#x1F68C;',bg:'#E6F1FB',
+            type:'bus', targetLat:midStop.la, targetLon:midStop.lo, thresholdM:80, speedTrigger:true,
+            busRoute:r.r1.short, busStops:r.stopsLeg1,
             title:'Board Route '+r.r1.short+' — '+r.r1.long,
             detail:t1m+' min · '+r.stopsLeg1+' stops to transfer',
             dur:t1m+'min'},
           {ic:'&#x1F504;',bg:'#FFF8EE',
+            type:'transfer', targetLat:midStop.la, targetLon:midStop.lo, thresholdM:60,
             title:'Transfer at '+midStop.n,
             detail:'Swap to Route '+r.r2.short,
             dur:'~'+TRANSFER_PENALTY+'min'},
           {ic:'&#x1F68C;',bg:'#E6F1FB',
+            type:'bus', targetLat:alightStop.la, targetLon:alightStop.lo, thresholdM:80, speedTrigger:true,
+            busRoute:r.r2.short, busStops:r.stopsLeg2,
             title:'Board Route '+r.r2.short+' — '+r.r2.long,
             detail:t2m+' min · '+r.stopsLeg2+' stops',
             dur:t2m+'min'},
           {ic:'&#x1F6B2;',bg:'#E1F5EE',
+            type:'ride', targetLat:locTo.lat, targetLon:locTo.lon, thresholdM:50,
             title:'Ride '+dkm(r.rdAlight)+' to destination from '+alightStop.n,
             detail:rT+' min on '+curV+(r.rdAlight>0.8?' — '+wT+' min on foot':''),
             dur:rT+'min',warn:r.rdAlight>1.5?'On foot: ~'+wT+' min':null}
@@ -1134,11 +1162,23 @@ function toggle(id){
 
 // ── Map & Navigation ──────────────────────────────────────────────────────
 let leafletMap = null;
+let mapLayers = []; // track all added layers for clean removal
 let activeCard = null;
 let navWatchId = null;
 let navStepIdx = 0;
 let navMarker = null;
 let navSteps = [];
+
+function addToMap(layer) {
+  layer.addTo(leafletMap);
+  mapLayers.push(layer);
+  return layer;
+}
+
+function clearMapLayers() {
+  mapLayers.forEach(l => { try { leafletMap.removeLayer(l); } catch(e) {} });
+  mapLayers = [];
+}
 
 function openMap(cardId) {
   const card = plannedCards.find(c => c.id === cardId);
@@ -1171,7 +1211,7 @@ function openMap(cardId) {
       }).addTo(leafletMap);
       L.control.zoom({position:'bottomright'}).addTo(leafletMap);
     } else {
-      leafletMap.eachLayer(l => { if (l instanceof L.Polyline || l instanceof L.Marker || l instanceof L.CircleMarker) leafletMap.removeLayer(l); });
+      clearMapLayers();
     }
     drawRouteOnMap(card);
   }, 100);
@@ -1197,10 +1237,10 @@ function drawRouteOnMap(card) {
       const isAlight = i === toIdx;
       if (isBoard || isAlight) continue; // drawn separately below
       // Intermediate stops — small dots
-      L.circleMarker([s.la, s.lo], {
+      addToMap(L.circleMarker([s.la, s.lo], {
         radius: 4, color: '#141416', fillColor: color,
         fillOpacity: 0.9, weight: 1.5
-      }).addTo(leafletMap).bindPopup(s.n);
+      })).bindPopup(s.n);
       bounds.push([s.la, s.lo]);
     }
   }
@@ -1233,7 +1273,7 @@ function drawRouteOnMap(card) {
       }
       const pts = shapeDir[bestDid];
       if (pts && pts.length) {
-        L.polyline(pts, {color, weight: 5, opacity: 0.9}).addTo(leafletMap);
+        addToMap(L.polyline(pts, {color, weight: 5, opacity: 0.9}));
         bounds.push(...pts.filter((_,i) => i % 10 === 0)); // sparse for bounds
       }
 
@@ -1250,8 +1290,8 @@ function drawRouteOnMap(card) {
   if (card.boardId) {
     const bs = stopById[card.boardId];
     if (bs) {
-      L.marker([bs.la, bs.lo], {icon: mkIcon('🚏', '#1D9E75'), zIndexOffset: 200})
-        .addTo(leafletMap)
+      addToMap(L.marker([bs.la, bs.lo], {icon: mkIcon('🚏', '#1D9E75'), zIndexOffset: 200})
+        )
         .bindPopup('<b>Board here</b><br>' + bs.n);
       bounds.push([bs.la, bs.lo]);
     }
@@ -1261,8 +1301,8 @@ function drawRouteOnMap(card) {
   if (card.midId) {
     const ms = stopById[card.midId];
     if (ms) {
-      L.marker([ms.la, ms.lo], {icon: mkIcon('🔄', '#e0a020'), zIndexOffset: 200})
-        .addTo(leafletMap)
+      addToMap(L.marker([ms.la, ms.lo], {icon: mkIcon('🔄', '#e0a020'), zIndexOffset: 200})
+        )
         .bindPopup('<b>Transfer here</b><br>' + ms.n);
       bounds.push([ms.la, ms.lo]);
     }
@@ -1272,8 +1312,8 @@ function drawRouteOnMap(card) {
   if (card.alightId) {
     const as = stopById[card.alightId];
     if (as) {
-      L.marker([as.la, as.lo], {icon: mkIcon('🚏', '#E24B4A'), zIndexOffset: 200})
-        .addTo(leafletMap)
+      addToMap(L.marker([as.la, as.lo], {icon: mkIcon('🚏', '#E24B4A'), zIndexOffset: 200})
+        )
         .bindPopup('<b>Get off here</b><br>' + as.n);
       bounds.push([as.la, as.lo]);
     }
@@ -1283,32 +1323,32 @@ function drawRouteOnMap(card) {
   const rideCol = segCol(curV);
   if (card._boardGeometry && card._boardGeometry.length) {
     const pts = card._boardGeometry.map(c => [c[1], c[0]]);
-    L.polyline(pts, {color: rideCol, weight: 4, opacity: 0.9, dashArray: '8,5'}).addTo(leafletMap);
+    addToMap(L.polyline(pts, {color: rideCol, weight: 4, opacity: 0.9, dashArray: '8,5'}));
     bounds.push(...pts.filter((_,i) => i % 5 === 0));
   }
   if (card._alightGeometry && card._alightGeometry.length) {
     const pts = card._alightGeometry.map(c => [c[1], c[0]]);
-    L.polyline(pts, {color: rideCol, weight: 4, opacity: 0.9, dashArray: '8,5'}).addTo(leafletMap);
+    addToMap(L.polyline(pts, {color: rideCol, weight: 4, opacity: 0.9, dashArray: '8,5'}));
     bounds.push(...pts.filter((_,i) => i % 5 === 0));
   }
   if (card._rideGeometry && card._rideGeometry.length) {
     const pts = card._rideGeometry.map(c => [c[1], c[0]]);
-    L.polyline(pts, {color: rideCol, weight: 5, opacity: 0.9, dashArray: '8,5'}).addTo(leafletMap);
+    addToMap(L.polyline(pts, {color: rideCol, weight: 5, opacity: 0.9, dashArray: '8,5'}));
     bounds.push(...pts.filter((_,i) => i % 5 === 0));
   }
 
   // Origin pin
   if (locFrom) {
-    L.marker([locFrom.lat, locFrom.lon], {icon: mkIcon('📍', '#1D9E75'), zIndexOffset: 300})
-      .addTo(leafletMap)
+    addToMap(L.marker([locFrom.lat, locFrom.lon], {icon: mkIcon('📍', '#1D9E75'), zIndexOffset: 300})
+      )
       .bindPopup('<b>Start</b><br>' + locFrom.label);
     bounds.push([locFrom.lat, locFrom.lon]);
   }
 
   // Destination pin
   if (locTo) {
-    L.marker([locTo.lat, locTo.lon], {icon: mkIcon('🏁', '#E24B4A'), zIndexOffset: 300})
-      .addTo(leafletMap)
+    addToMap(L.marker([locTo.lat, locTo.lon], {icon: mkIcon('🏁', '#E24B4A'), zIndexOffset: 300})
+      )
       .bindPopup('<b>Destination</b><br>' + locTo.label);
     bounds.push([locTo.lat, locTo.lon]);
   }
@@ -1338,33 +1378,193 @@ function closeMap() {
   }
 }
 
+// ── Live Navigation Engine ───────────────────────────────────────────────
+let navLastLat = null, navLastLon = null;
+let navLastSpeedMs = 0;
+let navOffRouteCount = 0;
+let navGeofenceCooldown = false;
+let navArrivedAlerted = false;
+
+const BUS_SPEED_MS = 5.5;    // ~20km/h — if GPS speed exceeds this, likely on bus
+const RIDE_SPEED_MS = 1.5;   // ~5.4km/h — if slower than this on a bus step, maybe not boarded yet
+const OFF_ROUTE_M = 180;     // metres off expected path before warning
+const GEOFENCE_COOLDOWN_MS = 8000; // min ms between auto-advances
+
 function startNavigation() {
   navStepIdx = 0;
+  navLastLat = null; navLastLon = null;
+  navLastSpeedMs = 0; navOffRouteCount = 0;
+  navGeofenceCooldown = false; navArrivedAlerted = false;
   document.getElementById('map-footer').innerHTML = buildNavBar();
   updateNavStep();
 
-  // Start GPS tracking
-  if (navigator.geolocation) {
-    navWatchId = navigator.geolocation.watchPosition(pos => {
-      const {latitude: lat, longitude: lon} = pos.coords;
-      if (!navMarker) {
-        const icon = L.divIcon({className:'', html:'<div style="width:16px;height:16px;background:#1D9E75;border:3px solid #fff;border-radius:50%;box-shadow:0 0 8px rgba(29,158,117,.6)"></div>'});
-        navMarker = L.marker([lat, lon], {icon, zIndexOffset:1000}).addTo(leafletMap);
+  if (!navigator.geolocation) return;
+  navWatchId = navigator.geolocation.watchPosition(pos => {
+    const lat = pos.coords.latitude;
+    const lon = pos.coords.longitude;
+    const speed = pos.coords.speed || 0; // m/s, null if unavailable
+    navLastSpeedMs = speed;
+
+    // Move dot
+    if (!navMarker) {
+      const icon = L.divIcon({className:'', html:'<div style="width:18px;height:18px;background:#1D9E75;border:3px solid #fff;border-radius:50%;box-shadow:0 0 10px rgba(29,158,117,.8)"></div>'});
+      navMarker = addToMap(L.marker([lat, lon], {icon, zIndexOffset:1000}));
+    } else {
+      navMarker.setLatLng([lat, lon]);
+    }
+    leafletMap.panTo([lat, lon], {animate:true, duration:0.5});
+
+    // Live navigation logic
+    liveNavUpdate(lat, lon, speed);
+
+    navLastLat = lat; navLastLon = lon;
+  }, err => {}, {enableHighAccuracy:true, maximumAge:3000, timeout:10000});
+}
+
+function liveNavUpdate(lat, lon, speed) {
+  if (!navSteps.length || navStepIdx >= navSteps.length) return;
+  if (navGeofenceCooldown) return;
+
+  const step = navSteps[navStepIdx];
+  if (!step.targetLat) return;
+
+  const mToTarget = dist(lat, lon, step.targetLat, step.targetLon) * 1000;
+  const threshold = step.thresholdM || 60;
+
+  // Update distance display
+  updateNavDistanceBar(mToTarget, step);
+
+  if (step.type === 'ride') {
+    // Auto-advance when within threshold of board/alight stop
+    if (mToTarget < threshold) {
+      triggerAutoAdvance('&#x2714; Arrived at ' + (navSteps[navStepIdx+1] ? navSteps[navStepIdx+1].title.split(' ')[0] + ' stop' : 'destination'));
+    }
+    // Off-route warning (only if we have a previous position)
+    if (navLastLat && step._geometry) {
+      const closestDist = distToPolyline(lat, lon, step._geometry);
+      if (closestDist > OFF_ROUTE_M) {
+        navOffRouteCount++;
+        if (navOffRouteCount >= 3) {
+          navOffRouteCount = 0;
+          showNavAlert('&#x26A0;&#xFE0F; Off route — recalculate?', true);
+        }
       } else {
-        navMarker.setLatLng([lat, lon]);
+        navOffRouteCount = 0;
       }
-      leafletMap.panTo([lat, lon], {animate:true, duration:0.5});
-    }, null, {enableHighAccuracy:true, maximumAge:5000});
+    }
+
+  } else if (step.type === 'bus') {
+    // Auto-advance when at alight stop OR moving fast (on bus)
+    const speedMs = speed || navLastSpeedMs;
+    const onBus = speedMs > BUS_SPEED_MS;
+
+    if (mToTarget < threshold) {
+      // Approaching alight stop — alert 1 stop before
+      if (!navArrivedAlerted) {
+        navArrivedAlerted = true;
+        showNavAlert('&#x1F514; Get ready — your stop is next!', false);
+        vibrate([200, 100, 200]);
+      }
+    }
+
+    if (mToTarget < (threshold * 0.6)) {
+      // Actually at the stop
+      triggerAutoAdvance('&#x2714; Get off here');
+      navArrivedAlerted = false;
+    }
+
+  } else if (step.type === 'transfer') {
+    if (mToTarget < threshold) {
+      triggerAutoAdvance('&#x2714; At transfer stop');
+    }
   }
 }
 
+function triggerAutoAdvance(msg) {
+  navGeofenceCooldown = true;
+  setTimeout(() => { navGeofenceCooldown = false; }, GEOFENCE_COOLDOWN_MS);
+
+  showNavAlert(msg, false);
+  vibrate([100, 50, 100]);
+
+  setTimeout(() => {
+    if (navStepIdx < navSteps.length - 1) {
+      navStepIdx++;
+      navArrivedAlerted = false;
+      updateNavStep();
+    } else {
+      // Arrived at final destination
+      showNavAlert('&#x1F3C1; You have arrived!', false);
+      vibrate([200, 100, 200, 100, 400]);
+      setTimeout(() => {
+        stopNavigation();
+        closeMap();
+      }, 3000);
+    }
+  }, 1200);
+}
+
+function updateNavDistanceBar(mToTarget, step) {
+  const el = document.getElementById('nav-distance');
+  if (!el) return;
+  if (mToTarget < 1000) {
+    el.textContent = Math.round(mToTarget) + 'm to go';
+  } else {
+    el.textContent = (mToTarget/1000).toFixed(1) + 'km to go';
+  }
+  // Color by proximity
+  el.style.color = mToTarget < 100 ? '#4dd4a0' : mToTarget < 300 ? '#e0a020' : '#555';
+}
+
+function showNavAlert(msg, hasRecalc) {
+  const el = document.getElementById('nav-alert');
+  if (!el) return;
+  el.innerHTML = msg + (hasRecalc ? ' <button onclick="recalculateRoute()" style="background:#1D9E75;color:#fff;border:none;border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer;margin-left:8px">Recalculate</button>' : '');
+  el.style.display = 'block';
+  clearTimeout(el._timer);
+  el._timer = setTimeout(() => { el.style.display = 'none'; }, hasRecalc ? 8000 : 4000);
+}
+
+function vibrate(pattern) {
+  try { if (navigator.vibrate) navigator.vibrate(pattern); } catch(e) {}
+}
+
+function distToPolyline(lat, lon, geometry) {
+  // geometry is [[lon,lat],...] from OSRM
+  let minD = Infinity;
+  for (let i = 0; i < geometry.length - 1; i++) {
+    const d = distToSegment(lat, lon,
+      geometry[i][1], geometry[i][0],
+      geometry[i+1][1], geometry[i+1][0]);
+    if (d < minD) minD = d;
+  }
+  return minD * 1000; // km -> m
+}
+
+function distToSegment(plat, plon, alat, alon, blat, blon) {
+  const dx = blat - alat, dy = blon - alon;
+  if (dx === 0 && dy === 0) return dist(plat, plon, alat, alon);
+  const t = Math.max(0, Math.min(1, ((plat-alat)*dx + (plon-alon)*dy) / (dx*dx+dy*dy)));
+  return dist(plat, plon, alat + t*dx, alon + t*dy);
+}
+
+function recalculateRoute() {
+  stopNavigation();
+  closeMap();
+  planRoute();
+}
+
 function buildNavBar() {
-  return '<div class="nav-bar" id="nav-bar">'+
-    '<div class="nav-current" id="nav-current"></div>'+
-    '<div class="nav-next" id="nav-next"></div>'+
-    '<div class="nav-controls">'+
-    '<button class="nav-btn" onclick="nextNavStep()">Next step &#8594;</button>'+
-    '<button class="nav-btn danger" onclick="endTripEarly()">End trip</button>'+
+  return '<div class="nav-bar" id="nav-bar">' +
+    '<div id="nav-alert" style="display:none;background:#0d2e20;color:#4dd4a0;border-radius:8px;padding:7px 10px;font-size:13px;margin-bottom:8px"></div>' +
+    '<div class="nav-current" id="nav-current"></div>' +
+    '<div style="display:flex;align-items:center;justify-content:space-between;margin-top:4px">' +
+      '<div class="nav-next" id="nav-next"></div>' +
+      '<div id="nav-distance" style="font-size:11px;color:#555"></div>' +
+    '</div>' +
+    '<div class="nav-controls">' +
+      '<button class="nav-btn" onclick="manualAdvance()">Next &#8594;</button>' +
+      '<button class="nav-btn danger" onclick="endTripEarly()">End trip</button>' +
     '</div></div>';
 }
 
@@ -1376,22 +1576,28 @@ function updateNavStep() {
   if (!cur) return;
   cur.innerHTML = step.ic + ' ' + step.title;
   if (navStepIdx + 1 < navSteps.length) {
-    nxt.innerHTML = 'Next: ' + navSteps[navStepIdx+1].title;
+    nxt.innerHTML = 'Then: ' + navSteps[navStepIdx+1].title;
   } else {
-    nxt.innerHTML = '<span style="color:#1D9E75">&#10003; You have arrived!</span>';
+    nxt.innerHTML = '<span style="color:#1D9E75">&#10003; Final step</span>';
+  }
+  // Focus map on the target waypoint
+  if (step.targetLat && leafletMap) {
+    leafletMap.flyTo([step.targetLat, step.targetLon], 16, {duration: 1.2});
   }
 }
 
-function nextNavStep() {
+function manualAdvance() {
   if (navStepIdx < navSteps.length - 1) {
     navStepIdx++;
+    navArrivedAlerted = false;
     updateNavStep();
   } else {
     stopNavigation();
     closeMap();
-    alert('You have arrived at your destination!');
   }
 }
+
+function nextNavStep() { manualAdvance(); }
 
 function endTripEarly() {
   if (confirm('End this trip and go back to route preview?')) {
