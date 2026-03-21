@@ -2189,17 +2189,33 @@ function drawRouteOnMap(card) {
     }
   }
 
-  // Draw real OSRM ride geometries if available
+  // Draw ride geometries — straight line for short legs, OSRM for longer ones
   const rideCol = segCol(curV);
-  if (card._boardGeometry && card._boardGeometry.length) {
-    const pts = card._boardGeometry.map(c => [c[1], c[0]]);
-    addToMap(L.polyline(pts, {color: rideCol, weight: 4, opacity: 0.9, dashArray: '8,5'}));
-    bounds.push(...pts.filter((_,i) => i % 5 === 0));
+  const SHORT_LEG_KM = 0.8; // under this, draw straight line (you can see where you're going)
+
+  function drawRideLeg(geometry, distKm, fromPt, toPt) {
+    if (geometry && geometry.length && distKm > SHORT_LEG_KM) {
+      // Long leg: use OSRM street routing
+      const pts = geometry.map(c => [c[1], c[0]]);
+      addToMap(L.polyline(pts, {color: rideCol, weight: 4, opacity: 0.9, dashArray: '8,5'}));
+      bounds.push(...pts.filter((_,i) => i % 5 === 0));
+    } else if (fromPt && toPt) {
+      // Short leg or no OSRM data: straight dashed line
+      addToMap(L.polyline([fromPt, toPt], {color: rideCol, weight: 4, opacity: 0.8, dashArray: '6,4'}));
+      bounds.push(fromPt, toPt);
+    }
   }
-  if (card._alightGeometry && card._alightGeometry.length) {
-    const pts = card._alightGeometry.map(c => [c[1], c[0]]);
-    addToMap(L.polyline(pts, {color: rideCol, weight: 4, opacity: 0.9, dashArray: '8,5'}));
-    bounds.push(...pts.filter((_,i) => i % 5 === 0));
+
+  const boardStop = stopById[card.boardId];
+  const alightStop = stopById[card.alightId];
+
+  if (boardStop) {
+    drawRideLeg(card._boardGeometry, card._boardDistKm || 0,
+      [locFrom.lat, locFrom.lon], [boardStop.la, boardStop.lo]);
+  }
+  if (alightStop) {
+    drawRideLeg(card._alightGeometry, card._alightDistKm || 0,
+      [alightStop.la, alightStop.lo], [locTo.lat, locTo.lon]);
   }
   if (card._rideGeometry && card._rideGeometry.length) {
     const pts = card._rideGeometry.map(c => [c[1], c[0]]);
