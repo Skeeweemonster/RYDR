@@ -544,7 +544,20 @@ const ROUTE_LEG_TIMES = {"RED":{"0":[1.92,1.0,1.57,1.0,1.57,1.0,1.0,1.0,1.0,1.0,
 const ROUTE_HEADWAYS = {"RED":{"wkd":15.9,"sat":19.4,"sun":21.8},"34":{"wkd":70.0,"sat":32.1,"sun":32.4},"68":{"wkd":39.4,"sat":37.6,"sun":36.6},"44U":{"wkd":54.1},"40U":{"wkd":56.8},"GRE":{"wkd":15.8,"sat":23.8,"sun":26.1},"66":{"wkd":22.4,"sat":22.6,"sun":22.8},"14":{"wkd":34.5,"sat":33.7,"sun":37.2},"11":{"wkd":22.7,"sat":21.4,"sun":20.6},"92":{"wkd":36.5,"sat":48.8,"sun":45.5},"PUR":{"wkd":17.5,"sat":22.6,"sun":23.3},"22":{"wkd":15.7,"sat":18.8,"sun":17.8},"21":{"wkd":19.7,"sat":25.8,"sun":24.5},"30":{"wkd":12.8,"sat":16.9,"sun":19.6},"56":{"wkd":30.1,"sat":28.6,"sun":28.7},"CN1":{"wkd":10.6,"sat":15.0,"sun":15.9},"31":{"wkd":45.8,"sat":42.8,"sun":41.3},"88":{"wkd":28.1,"sat":26.7,"sun":25.9},"73":{"wkd":43.9,"sat":43.9,"sun":43.8},"19":{"wkd":19.9,"sat":27.2,"sun":27.6},"12":{"wkd":22.7,"sat":26.8,"sun":26.8},"80":{"wkd":11.0,"sat":13.7,"sun":14.0},"81":{"wkd":106.9},"BLU":{"wkd":19.7,"sat":27.8,"sun":26.3},"20":{"wkd":131.4,"sat":56.6,"sun":55.6},"82":{"wkd":37.5,"sat":37.9,"sun":36.0},"15":{"wkd":18.6,"sat":21.7,"sun":26.0},"18":{"wkd":10.5,"sat":12.5,"sun":12.8},"57":{"wkd":30.0,"sat":36.2,"sun":34.0},"63":{"wkd":23.1,"sat":23.8,"sun":25.6},"33":{"wkd":62.9,"sat":43.2,"sun":40.5},"35":{"wkd":18.6,"sat":20.7,"sun":25.3},"28":{"wkd":71.5,"sat":40.0,"sun":41.2},"54":{"wkd":31.6,"sat":32.2,"sun":32.7},"52":{"wkd":44.7,"sat":43.0,"sun":43.0},"51":{"wkd":22.4,"sat":27.4,"sun":29.7},"60":{"wkd":23.3,"sat":31.3,"sun":32.7},"76":{"wkd":20.3,"sat":31.1,"sun":28.5},"59":{"wkd":32.9,"sat":65.7,"sun":65.7},"55":{"wkd":58.5,"sat":27.8,"sun":25.7},"53":{"wkd":28.7,"sat":30.3,"sun":32.3},"74":{"wkd":26.3,"sat":50.5,"sun":48.4},"58":{"wkd":110.1,"sat":50.2,"sun":47.4},"RR2":{"wkd":1.1},"24":{"wkd":14.5,"sat":18.1,"sun":18.8},"RR3":{"wkd":1.1},"RR1":{"wkd":8.5}};
 
 const BUSTIME_KEY = 'JMkwincTzwFS45GuxG7VXmyj7';
-const BUSTIME_URL = 'https://realtime.ridemcts.com/bustime/api/v3';
+const BUSTIME_URL_DIRECT = 'https://realtime.ridemcts.com/bustime/api/v3';
+// Wrap BusTime calls through CORS proxy since ridemcts.com blocks GitHub Pages
+function bustimeUrl(endpoint, params) {
+  const url = BUSTIME_URL_DIRECT + '/' + endpoint + '?' + params + '&format=json';
+  return 'https://api.allorigins.win/get?url=' + encodeURIComponent(url);
+}
+async function bustimeFetch(endpoint, params) {
+  try {
+    const r = await fetch(bustimeUrl(endpoint, params));
+    const wrapper = await r.json();
+    return JSON.parse(wrapper.contents);
+  } catch(e) { return null; }
+}
+const BUSTIME_URL = BUSTIME_URL_DIRECT; // keep for compatibility
 
 async function fetchPredictions(stopId, routeId) {
   try {
@@ -739,6 +752,11 @@ function selectVehicleCard(el, gridId) {
 }
 
 let locFrom=null, locTo=null, curV='bike', rideRadius=3.0;
+let scheduleLoading = false;
+let scheduleLoaded = false;
+let STOP_SCHEDULE = null;
+let alertsLoaded = false;
+let alertsLastFetch = 0;
 let curLat=null, curLon=null; // continuously updated GPS position
 let openCards={}, plannedCards=[];
 let acTimer={from:null,to:null}, acData={from:[],to:[]}, acIdx={from:-1,to:-1};
@@ -1650,9 +1668,7 @@ async function refineWithOSRM(cards) {
 
 
 // ── Schedule-aware routing ────────────────────────────────────────────────
-let STOP_SCHEDULE = null;      // loaded once from stop_schedule.json
-let scheduleLoading = false;
-let scheduleLoaded = false;
+// scheduleLoading and scheduleLoaded moved to globals
 
 // Load schedule data once (1.7MB, fetched from same host)
 async function loadSchedule() {
@@ -2757,11 +2773,8 @@ function loadNearbyBuses() {
     const stopIds = nearby.map(s => s.id).join(',');
     let preds = [];
     try {
-      const url = BUSTIME_URL + '/getpredictions?key=' + BUSTIME_KEY +
-        '&stpid=' + stopIds + '&format=json&top=3';
-      const r = await fetch(url);
-      const data = await r.json();
-      preds = data['bustime-response']?.prd || [];
+      const nearbyData = await bustimeFetch('getpredictions', 'key=' + BUSTIME_KEY + '&stpid=' + stopIds + '&top=3');
+      preds = nearbyData?.['bustime-response']?.prd || [];
       // Update peek with first live prediction
       const firstPred = preds.find(p => p.stpid === closest.id) || preds[0];
       updateClosestPreview(closest, firstPred || null);
@@ -3242,11 +3255,8 @@ let busPositionTimer = null;
 // Fetch all vehicles on a given route from BusTime getvehicles API
 async function fetchVehiclePositions(routeId) {
   try {
-    const url = BUSTIME_URL + '/getvehicles?key=' + BUSTIME_KEY +
-      '&rt=' + routeId + '&format=json';
-    const r = await fetch(url);
-    const d = await r.json();
-    return d['bustime-response']?.vehicle || [];
+    const d = await bustimeFetch('getvehicles', 'key=' + BUSTIME_KEY + '&rt=' + routeId);
+    return d?.['bustime-response']?.vehicle || [];
   } catch(e) { return []; }
 }
 
@@ -3427,8 +3437,7 @@ function escHtml(s) {
 
 // ── Service alerts & detours ──────────────────────────────────────────────
 let SERVICE_ALERTS = {};   // routeId -> [{title, detail, type}]
-let alertsLoaded = false;
-let alertsLastFetch = 0;
+// alertsLoaded and alertsLastFetch moved to globals
 const ALERTS_TTL = 10 * 60 * 1000; // refresh every 10 min
 
 async function loadServiceAlerts() {
@@ -3438,9 +3447,8 @@ async function loadServiceAlerts() {
 
   try {
     // Fetch bulletins (planned service changes, detours)
-    const bUrl = BUSTIME_URL + '/getservicebulletins?key=' + BUSTIME_KEY + '&format=json&locale=en';
-    const bRes = await fetch(bUrl);
-    const bData = await bRes.json();
+    const bData = await bustimeFetch('getservicebulletins', 'key=' + BUSTIME_KEY + '&locale=en');
+    if (!bData) throw new Error('No data');
     const bulletins = bData['bustime-response']?.sb || [];
     bulletins.forEach(b => {
       const routes = (b.srvc || []).map(s => s.rt).filter(Boolean);
@@ -3459,9 +3467,8 @@ async function loadServiceAlerts() {
 
   try {
     // Fetch active detours
-    const dUrl = BUSTIME_URL + '/getdetours?key=' + BUSTIME_KEY + '&format=json';
-    const dRes = await fetch(dUrl);
-    const dData = await dRes.json();
+    const dData = await bustimeFetch('getdetours', 'key=' + BUSTIME_KEY);
+    if (!dData) throw new Error('No data');
     const detours = dData['bustime-response']?.dtour || [];
     detours.forEach(d => {
       const routes = (d.rtdirection || []).map(r => r.rt).filter(Boolean);
