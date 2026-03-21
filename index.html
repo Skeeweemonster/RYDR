@@ -1003,8 +1003,32 @@ function findBestRoutes(fromMap, toMap) {
       // Board at the closest stop to origin, alight at the closest stop to destination.
       // The bus does maximum work; we ride the minimum.
 
-      // Sort boards closest-to-origin first, alights closest-to-dest first
-      boards.sort((a, b) => a[0] - b[0]);
+      // Sort boards by EFFECTIVE distance — straight-line plus a lateral detour penalty.
+      // A stop that requires going sideways off the direct path to dest costs extra.
+      // This fixes cases where two stops are nearly equidistant by straight line
+      // but one requires 4 extra blocks east-west while the other is straight south.
+      const fromLat0 = curLat || locFrom.lat;
+      const fromLon0 = curLon || locFrom.lon;
+      const toLat0   = locTo.lat, toLon0 = locTo.lon;
+      // Vector from origin to dest (normalized)
+      const dxOD = toLon0 - fromLon0, dyOD = toLat0 - fromLat0;
+      const lenOD = Math.sqrt(dxOD*dxOD + dyOD*dyOD) || 1;
+
+      boards.sort((a, b) => {
+        const sa = stopById[a[2]], sb = stopById[b[2]];
+        if (!sa || !sb) return a[0] - b[0];
+        // Project stop onto origin→dest line, compute perpendicular (lateral) offset
+        const axOD = sa.lo - fromLon0, ayOD = sa.la - fromLat0;
+        const bxOD = sb.lo - fromLon0, byOD = sb.la - fromLat0;
+        const aPara = (axOD*dxOD + ayOD*dyOD) / lenOD;  // along-path component
+        const bPara = (bxOD*dxOD + byOD*dyOD) / lenOD;
+        const aLat  = Math.abs(axOD*dyOD - ayOD*dxOD) / lenOD;  // lateral offset
+        const bLat  = Math.abs(bxOD*dyOD - byOD*dxOD) / lenOD;
+        // Effective score: straight-line + 0.5x lateral penalty (in same degree units)
+        const aScore = a[0] + aLat * 0.5;
+        const bScore = b[0] + bLat * 0.5;
+        return aScore - bScore;
+      });
       alights.sort((a, b) => a[0] - b[0]);
 
       let best = null;
@@ -1026,36 +1050,18 @@ function findBestRoutes(fromMap, toMap) {
         }
         if (!bestAlight) continue;
 
-        // "Don't overshoot" check: if an earlier stop on this route is
-        // roughly "on the way" to the chosen stop, board there instead.
-        // A stop is on the way if the detour to reach it adds <20% extra distance.
-        let effectiveBsid = bsid, effectiveBiIdx = bi_idx, effectiveRdB = rdB;
-        for (const [rdB2, bi2, bsid2] of boards) {
-          if (bi2 >= bi_idx) continue; // only earlier stops in sequence
-          const s2 = stopById[bsid2];
-          if (!s2) continue;
-          // Is this earlier stop "on the way"? 
-          // Check: riding to s2 then walking to chosen stop ≈ riding directly to chosen stop
-          const detourDist = rdB2 + dist(s2.la, s2.lo, boardStop.la, boardStop.lo);
-          if (detourDist < rdB * 1.25) {
-            // Earlier stop is on the way — board here instead
-            effectiveBsid = bsid2; effectiveBiIdx = bi2; effectiveRdB = rdB2;
-            // Keep looking for even earlier stops that are also on the way
-          }
-        }
-
         const [rdA, ai_idx, asid] = bestAlight;
-        const stops = ai_idx - effectiveBiIdx;
-        const s = scheduleTimeExact(effectiveBsid, rid, asid, effectiveRdB, effectiveBiIdx, ai_idx, did, rdA);
+        const stops = ai_idx - bi_idx;
+        const s = scheduleTimeExact(bsid, rid, asid, rdB, bi_idx, ai_idx, did, rdA);
         if (!s.feasible) continue;
 
-        const rideKm = effectiveRdB + rdA;
+        const rideKm = rdB + rdA;
         if (!best || rideKm < best.rideKm - 0.05 ||
             (rideKm <= best.rideKm + 0.05 && s.total < best.total)) {
           best = {rid, did, route: GTFS.routes[rid],
-            boardId: effectiveBsid, alightId: asid,
-            boardIdx: effectiveBiIdx, alightIdx: ai_idx,
-            rdBoard: effectiveRdB, rdAlight: rdA,
+            boardId: bsid, alightId: asid,
+            boardIdx: bi_idx, alightIdx: ai_idx,
+            rdBoard: rdB, rdAlight: rdA,
             rideKm,
             stops, transitMins: s.transitMins,
             waitMins: Math.round(s.wait || 0),
