@@ -1022,32 +1022,20 @@ function findBestRoutes(fromMap, toMap) {
       // Board at the closest stop to origin, alight at the closest stop to destination.
       // The bus does maximum work; we ride the minimum.
 
-      // Sort boards by EFFECTIVE distance — straight-line plus a lateral detour penalty.
-      // A stop that requires going sideways off the direct path to dest costs extra.
-      // This fixes cases where two stops are nearly equidistant by straight line
-      // but one requires 4 extra blocks east-west while the other is straight south.
+      // Board stops: sort purely by straight-line distance from current position.
+      // A→B is solved independently — we just want the closest stop on this route.
+      // pickBestBoardStops will then use real OSRM street distances to confirm.
       const fromLat0 = curLat || locFrom.lat;
       const fromLon0 = curLon || locFrom.lon;
-      const toLat0   = locTo.lat, toLon0 = locTo.lon;
-      // Vector from origin to dest (normalized)
-      const dxOD = toLon0 - fromLon0, dyOD = toLat0 - fromLat0;
-      const lenOD = Math.sqrt(dxOD*dxOD + dyOD*dyOD) || 1;
 
-      boards.sort((a, b) => {
-        const sa = stopById[a[2]], sb = stopById[b[2]];
-        if (!sa || !sb) return a[0] - b[0];
-        // Project stop onto origin→dest line, compute perpendicular (lateral) offset
-        const axOD = sa.lo - fromLon0, ayOD = sa.la - fromLat0;
-        const bxOD = sb.lo - fromLon0, byOD = sb.la - fromLat0;
-        const aPara = (axOD*dxOD + ayOD*dyOD) / lenOD;  // along-path component
-        const bPara = (bxOD*dxOD + byOD*dyOD) / lenOD;
-        const aLat  = Math.abs(axOD*dyOD - ayOD*dxOD) / lenOD;  // lateral offset
-        const bLat  = Math.abs(bxOD*dyOD - byOD*dxOD) / lenOD;
-        // Effective score: straight-line + 0.5x lateral penalty (in same degree units)
-        const aScore = a[0] + aLat * 0.5;
-        const bScore = b[0] + bLat * 0.5;
-        return aScore - bScore;
-      });
+      // Recompute distances from live position if available
+      if (curLat && curLon) {
+        for (let k = 0; k < boards.length; k++) {
+          const s = stopById[boards[k][2]];
+          if (s) boards[k] = [dist(curLat, curLon, s.la, s.lo), boards[k][1], boards[k][2]];
+        }
+      }
+      boards.sort((a, b) => a[0] - b[0]);
       alights.sort((a, b) => a[0] - b[0]);
 
       let best = null;
@@ -3542,21 +3530,26 @@ function updateCardAlerts(card, el) {
 
 async function pickBestBoardStops(cards) {
   if (!locFrom && !curLat) return;
-  const fromLat = curLat || locFrom.lat;
-  const fromLon = curLon || locFrom.lon;
+  const fromLat = (curLat != null) ? curLat : locFrom.lat;
+  const fromLon = (curLon != null) ? curLon : locFrom.lon;
   const profile = osrmProfile(curV);
+  console.log('pickBestBoardStops: using position', fromLat.toFixed(4), fromLon.toFixed(4));
 
   await Promise.all(cards
     .filter(c => c.id !== 'ride' && c.boardId)
     .map(async card => {
       try {
-      const rid = card.rid || card.r1id;
+      const rid = card.liveRouteId || card.r1id;
       const did = card.did || card.did1;
-      if (!rid || !did) { console.log('pickBest: no rid/did for', card.id); return; }
+      // Find the right direction if did not set
+      const didToUse = did || Object.keys((GTFS.route_stops_bi[rid] || {})).find(d =>
+        (GTFS.route_stops_bi[rid][d] || []).includes(card.boardId)
+      );
+      if (!rid || !didToUse) { console.log('pickBest: no rid/did for', card.id, 'rid='+rid); return; }
 
-      const seq = (GTFS.route_stops_bi[rid] || {})[did] || [];
-      const boardIdx = card.boardIdx;
-      if (boardIdx == null) return;
+      const seq = (GTFS.route_stops_bi[rid] || {})[didToUse] || [];
+      const boardIdx = card.boardIdx != null ? card.boardIdx : seq.indexOf(card.boardId);
+      if (boardIdx === -1 || boardIdx == null) { console.log('pickBest: boardIdx not found for', card.id); return; }
 
       // Candidates: stops within ±5 sequence positions of chosen board stop
       // that are within ride radius
