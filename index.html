@@ -3554,7 +3554,7 @@ async function pickBestBoardStops(cards) {
       // Candidates: stops within ±5 sequence positions of chosen board stop
       // that are within ride radius
       const candidates = [];
-      for (let i = Math.max(0, boardIdx - 5); i <= Math.min(seq.length-1, boardIdx + 2); i++) {
+      for (let i = Math.max(0, boardIdx - 3); i <= Math.min(seq.length-1, boardIdx + 1); i++) {
         const s = stopById[seq[i]];
         if (!s) continue;
         const slDist = dist(fromLat, fromLon, s.la, s.lo);
@@ -3565,20 +3565,30 @@ async function pickBestBoardStops(cards) {
       candidates.forEach(c => console.log(`  candidate: ${c.s.n} sl=${(c.slDist*0.621).toFixed(2)}mi`));
       if (candidates.length < 2) return;
 
-      // Fetch OSRM for all candidates in parallel
-      const results = await Promise.all(candidates.map(async ({s, i}) => {
+      // Fetch OSRM sequentially for top 3 candidates to avoid rate limiting
+      // Sequential is slightly slower but far more reliable on public OSRM
+      candidates.sort((a, b) => a.slDist - b.slDist);
+      const top3 = candidates.slice(0, 3);
+      const results = [];
+      for (const {s, i} of top3) {
         try {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 4000); // 4s timeout
           const url = `${OSRM}/${profile}/${fromLon},${fromLat};${s.lo},${s.la}?overview=false`;
-          const r = await fetch(url);
-          if (!r.ok) return null;
+          const r = await fetch(url, {signal: controller.signal});
+          clearTimeout(timeout);
+          if (!r.ok) { results.push(null); continue; }
           const d = await r.json();
           const route = d.routes?.[0];
-          if (!route) return null;
+          if (!route) { results.push(null); continue; }
           const km = route.distance / 1000;
           console.log(`  OSRM ${s.n}: ${(km*0.621).toFixed(2)}mi by street`);
-          return {s, i, streetKm: km};
-        } catch(e) { console.warn(`  OSRM error for ${s.n}:`, e); return null; }
-      }));
+          results.push({s, i, streetKm: km});
+        } catch(e) {
+          console.warn(`  OSRM timeout/error for ${s.n} - skipping`);
+          results.push(null);
+        }
+      }
 
       const valid = results.filter(Boolean);
       if (!valid.length) return;
