@@ -1007,16 +1007,21 @@ function findBestRoutes(fromMap, toMap) {
         }
         if (!bestAlight) continue;
 
-        // "Don't overshoot" check: if there's an earlier stop on this route
-        // within 400m of this board stop AND within ride radius,
-        // prefer it — the rider would pass it on the way anyway.
+        // "Don't overshoot" check: if an earlier stop on this route is
+        // roughly "on the way" to the chosen stop, board there instead.
+        // A stop is on the way if the detour to reach it adds <20% extra distance.
         let effectiveBsid = bsid, effectiveBiIdx = bi_idx, effectiveRdB = rdB;
         for (const [rdB2, bi2, bsid2] of boards) {
-          if (bi2 >= bi_idx) continue; // only earlier stops
-          const d = dist(boardStop.la, boardStop.lo, stopById[bsid2]?.la, stopById[bsid2]?.lo);
-          if (d < 0.4) { // within 400m — rider passes this stop
+          if (bi2 >= bi_idx) continue; // only earlier stops in sequence
+          const s2 = stopById[bsid2];
+          if (!s2) continue;
+          // Is this earlier stop "on the way"? 
+          // Check: riding to s2 then walking to chosen stop ≈ riding directly to chosen stop
+          const detourDist = rdB2 + dist(s2.la, s2.lo, boardStop.la, boardStop.lo);
+          if (detourDist < rdB * 1.25) {
+            // Earlier stop is on the way — board here instead
             effectiveBsid = bsid2; effectiveBiIdx = bi2; effectiveRdB = rdB2;
-            break; // boards sorted by rdB so first earlier stop is closest to origin
+            // Keep looking for even earlier stops that are also on the way
           }
         }
 
@@ -1487,8 +1492,13 @@ async function refineWithOSRM(cards) {
       const bs = stopById[c.boardId];
       const as = stopById[c.alightId];
       if (bs) {
-        const bk = `${locFrom.lat},${locFrom.lon}|${bs.la},${bs.lo}`;
-        legsToFetch.push({key:bk, fromLat:locFrom.lat, fromLon:locFrom.lon, toLat:bs.la, toLon:bs.lo});
+        // Snap origin longitude to board stop longitude when within 400m east-west.
+        // This ensures OSRM routes straight north-south rather than diagonally
+        // when the user is already on the same street as the board stop.
+        const ewOffset = Math.abs(locFrom.lon - bs.lo) * 111320 * Math.cos(locFrom.lat * Math.PI / 180);
+        const fromLon = ewOffset < 0.4 ? bs.lo : locFrom.lon;
+        const bk = `${locFrom.lat},${fromLon}|${bs.la},${bs.lo}`;
+        legsToFetch.push({key:bk, fromLat:locFrom.lat, fromLon:fromLon, toLat:bs.la, toLon:bs.lo});
         cardLegs[c.id] = cardLegs[c.id] || {};
         cardLegs[c.id].boardKey = bk;
         cardLegs[c.id].boardStop = bs;
