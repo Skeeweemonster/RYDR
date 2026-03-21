@@ -280,6 +280,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .maps-divider{display:flex;align-items:center;gap:8px;margin-bottom:10px}
 .maps-divider span{font-size:11px;color:#444;white-space:nowrap}
 .maps-divider::before,.maps-divider::after{content:'';flex:1;height:1px;background:#2a2a30}
+
+/* Service alerts */
+.alert-banner{background:#2a1a00;border:1px solid #e0a020;border-radius:8px;padding:8px 10px;margin:8px 14px 0;display:flex;gap:7px;align-items:flex-start}
+.alert-banner .alert-icon{font-size:14px;flex-shrink:0;margin-top:1px}
+.alert-banner .alert-body{flex:1;min-width:0}
+.alert-banner .alert-title{font-size:12px;font-weight:600;color:#e0a020;margin-bottom:2px}
+.alert-banner .alert-detail{font-size:11px;color:#a07030;line-height:1.4}
+.alert-tag{background:#2a1a00;color:#e0a020;border:1px solid #e0a020}
 </style>
 </head>
 <body>
@@ -747,8 +755,9 @@ if (!localStorage.getItem('rydr_profile')) {
 }
 // Get GPS location for origin
 getGPSLocation();
-// Start loading schedule data in background
+// Start loading schedule data and service alerts in background
 loadSchedule();
+loadServiceAlerts();
 // Restore header avatar/name
 try {
   const p = JSON.parse(localStorage.getItem('rydr_profile') || '{}');
@@ -1753,6 +1762,7 @@ function planRoute(){
 
   if(!locFrom||!locTo)return;
 
+  loadServiceAlerts(); // refresh alerts if stale
   openCards={}; plannedCards=[];
   document.getElementById('results').innerHTML='<div class="loading-msg"><div class="spinner"></div>Searching all stops within '+(rideRadius*0.621371).toFixed(1)+' mi...</div>';
 
@@ -1969,6 +1979,14 @@ function renderCard(c){
     const w=s.warn?'<div class="warn"><span>&#9888; '+s.warn+'</span></div>':'';
     return '<div class="step"><div class="step-icon" style="background:'+s.bg+'">'+s.ic+'</div><div class="step-body"><div class="step-title">'+s.title+'</div><div class="step-det">'+s.detail+'</div>'+w+'</div><div class="step-dur">'+s.dur+'</div></div>';
   }).join('')+'</div>':'';
+  // Service alert banner
+  const cardAlerts = getAlertsForCard(c);
+  const alertHtml = alertBannerHtml(cardAlerts);
+  // Add alert tag to tags row if alerts exist
+  if (cardAlerts.length && !c.tags.find(t => t && t.t && t.t.includes('Alert'))) {
+    c.tags.push({t: '⚠ Alert', c: 'alert-tag'});
+  }
+
   const liveSection = c.boardStopId && c.liveRouteId
     ? `<div id="live-${c.id}" style="padding:6px 14px 10px;display:flex;align-items:center;gap:4px">
         <span style="font-size:11px;color:#555;margin-right:4px">Next bus:</span>
@@ -1977,6 +1995,7 @@ function renderCard(c){
     : '';
   return '<div class="route-card'+(c.best?' best':'')+'" id="card-'+c.id+'" onclick="toggle(\''+c.id+'\');if(this.dataset.loaded!==\'1\'){this.dataset.loaded=\'1\';showLiveTimes(\''+c.boardStopId+'\',\''+c.liveRouteId+'\',\''+c.id+'\')}"'+
     (c.boardStopId ? ' style="cursor:pointer"' : '')+'>'+
+    alertHtml +
     '<div class="rc-head"><div><div class="rc-title">'+c.title+'</div><div class="rc-sub">'+c.sub+'</div></div>'+
     '<div class="rc-time"><div class="rc-mins">'+c.mins+'</div><div class="rc-ml">min</div></div></div>'+
     '<div class="seg-bar">'+segs+'</div><div class="tags">'+tags+'</div>'+liveSection+stepsHtml+
@@ -2075,18 +2094,41 @@ function drawRouteOnMap(card) {
     const seq = (GTFS.route_stops_bi[rid] || {})[did] || [];
     const r = GTFS.routes[rid];
     const color = r ? '#' + r.color.replace(/^#/,'') : '#1D9E75';
+
+    // Draw stops between board and alight — full color dots
     for (let i = fromIdx; i <= toIdx; i++) {
       const s = stopById[seq[i]];
       if (!s) continue;
-      const isBoard = i === fromIdx;
-      const isAlight = i === toIdx;
-      if (isBoard || isAlight) continue; // drawn separately below
-      // Intermediate stops — small dots
+      if (i === fromIdx || i === toIdx) continue; // drawn separately
       addToMap(L.circleMarker([s.la, s.lo], {
         radius: 4, color: '#141416', fillColor: color,
         fillOpacity: 0.9, weight: 1.5
-      })).bindPopup(s.n);
+      })).bindPopup('<b>' + s.n + '</b><br><span style="font-size:11px;color:#888">Bus stop on route</span>');
       bounds.push([s.la, s.lo]);
+    }
+
+    // Draw stops BEFORE the board stop — dimmer, smaller dots
+    // These are stops the rider could skate to instead (earlier on the route)
+    // Show up to 5 stops before board stop, within ride radius
+    const rideRadiusKm = rideRadius;
+    for (let i = fromIdx - 1; i >= Math.max(0, fromIdx - 8); i--) {
+      const s = stopById[seq[i]];
+      if (!s) continue;
+      // Only show if within ride radius of origin
+      if (locFrom) {
+        const d = dist(locFrom.lat, locFrom.lon, s.la, s.lo);
+        if (d > rideRadiusKm) break; // stops getting farther
+      }
+      const marker = addToMap(L.circleMarker([s.la, s.lo], {
+        radius: 4, color: '#141416', fillColor: color,
+        fillOpacity: 0.4, weight: 1, dashArray: '2,2'
+      }));
+      marker.bindPopup(
+        '<b>' + s.n + '</b>' +
+        '<br><span style="font-size:11px;color:#4dd4a0">Earlier stop — board here to ride longer</span>' +
+        (locFrom ? '<br><span style="font-size:11px;color:#888">' +
+          dkm(dist(locFrom.lat, locFrom.lon, s.la, s.lo)) + ' from your location</span>' : '')
+      );
     }
   }
 
@@ -3351,6 +3393,110 @@ function openSecondLeg(provider) {
 
 function escHtml(s) {
   return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+
+// ── Service alerts & detours ──────────────────────────────────────────────
+let SERVICE_ALERTS = {};   // routeId -> [{title, detail, type}]
+let alertsLoaded = false;
+let alertsLastFetch = 0;
+const ALERTS_TTL = 10 * 60 * 1000; // refresh every 10 min
+
+async function loadServiceAlerts() {
+  if (Date.now() - alertsLastFetch < ALERTS_TTL) return;
+  alertsLastFetch = Date.now();
+  const newAlerts = {};
+
+  try {
+    // Fetch bulletins (planned service changes, detours)
+    const bUrl = BUSTIME_URL + '/getservicebulletins?key=' + BUSTIME_KEY + '&format=json&locale=en';
+    const bRes = await fetch(bUrl);
+    const bData = await bRes.json();
+    const bulletins = bData['bustime-response']?.sb || [];
+    bulletins.forEach(b => {
+      const routes = (b.srvc || []).map(s => s.rt).filter(Boolean);
+      if (!routes.length) return;
+      const alert = {
+        title: b.nm || b.sbj || 'Service Alert',
+        detail: b.dtail || b.brf || '',
+        type: 'bulletin'
+      };
+      routes.forEach(rt => {
+        if (!newAlerts[rt]) newAlerts[rt] = [];
+        newAlerts[rt].push(alert);
+      });
+    });
+  } catch(e) { console.warn('Bulletins unavailable:', e.message); }
+
+  try {
+    // Fetch active detours
+    const dUrl = BUSTIME_URL + '/getdetours?key=' + BUSTIME_KEY + '&format=json';
+    const dRes = await fetch(dUrl);
+    const dData = await dRes.json();
+    const detours = dData['bustime-response']?.dtour || [];
+    detours.forEach(d => {
+      const routes = (d.rtdirection || []).map(r => r.rt).filter(Boolean);
+      const alert = {
+        title: d.nm || 'Active Detour',
+        detail: d.startdt ? 'In effect from ' + d.startdt : '',
+        type: 'detour'
+      };
+      routes.forEach(rt => {
+        if (!newAlerts[rt]) newAlerts[rt] = [];
+        newAlerts[rt].push(alert);
+      });
+    });
+  } catch(e) { console.warn('Detours unavailable:', e.message); }
+
+  SERVICE_ALERTS = newAlerts;
+  alertsLoaded = true;
+
+  // If results are already showing, re-render to add alert banners
+  if (plannedCards.length) {
+    document.querySelectorAll('.route-card').forEach(el => {
+      const id = el.id.replace('card-','');
+      const card = plannedCards.find(c => c.id === id);
+      if (card) updateCardAlerts(card, el);
+    });
+  }
+}
+
+function getAlertsForCard(card) {
+  const rids = [card.rid, card.r1id, card.r2id, card.liveRouteId].filter(Boolean);
+  const seen = new Set();
+  const alerts = [];
+  rids.forEach(rid => {
+    (SERVICE_ALERTS[rid] || []).forEach(a => {
+      const key = a.title;
+      if (!seen.has(key)) { seen.add(key); alerts.push(a); }
+    });
+  });
+  return alerts;
+}
+
+function alertBannerHtml(alerts) {
+  if (!alerts.length) return '';
+  return alerts.map(a =>
+    '<div class="alert-banner">' +
+    '<div class="alert-icon">' + (a.type === 'detour' ? '🚧' : '⚠️') + '</div>' +
+    '<div class="alert-body">' +
+    '<div class="alert-title">' + esc2(a.title) + '</div>' +
+    (a.detail ? '<div class="alert-detail">' + esc2(a.detail) + '</div>' : '') +
+    '</div></div>'
+  ).join('');
+}
+
+function updateCardAlerts(card, el) {
+  if (!el) return;
+  const alerts = getAlertsForCard(card);
+  // Remove old alert banners
+  el.querySelectorAll('.alert-banner').forEach(b => b.remove());
+  if (!alerts.length) return;
+  // Insert after tags row
+  const tagsEl = el.querySelector('.tags');
+  if (tagsEl) {
+    tagsEl.insertAdjacentHTML('afterend', alertBannerHtml(alerts));
+  }
 }
 
 </script>
