@@ -739,6 +739,7 @@ function selectVehicleCard(el, gridId) {
 }
 
 let locFrom=null, locTo=null, curV='bike', rideRadius=3.0;
+let curLat=null, curLon=null; // continuously updated GPS position
 let openCards={}, plannedCards=[];
 let acTimer={from:null,to:null}, acData={from:[],to:[]}, acIdx={from:-1,to:-1};
 
@@ -861,6 +862,14 @@ function refreshLocation() {
   }
 }
 
+// Continuous background position watch — keeps curLat/curLon fresh
+if (navigator.geolocation) {
+  navigator.geolocation.watchPosition(pos => {
+    curLat = pos.coords.latitude;
+    curLon = pos.coords.longitude;
+  }, () => {}, {enableHighAccuracy: true, maximumAge: 5000, timeout: 10000});
+}
+
 function getGPSLocation() {
   if (!navigator.geolocation) {
     setOriginStatus('error', 'Location not supported');
@@ -877,6 +886,7 @@ function getGPSLocation() {
         const parts = data.display_name ? data.display_name.split(',') : [];
         const label = parts.slice(0,2).join(', ').trim() || 'Current location';
         locFrom = {lat, lon, label};
+        curLat = lat; curLon = lon;
         setOriginStatus('located', label);
         checkReady();
       })
@@ -1507,10 +1517,13 @@ async function refineWithOSRM(cards) {
         // Snap origin longitude to board stop longitude when within 400m east-west.
         // This ensures OSRM routes straight north-south rather than diagonally
         // when the user is already on the same street as the board stop.
-        const ewOffset = Math.abs(locFrom.lon - bs.lo) * 111320 * Math.cos(locFrom.lat * Math.PI / 180);
-        const fromLon = ewOffset < 0.4 ? bs.lo : locFrom.lon;
-        const bk = `${locFrom.lat},${fromLon}|${bs.la},${bs.lo}`;
-        legsToFetch.push({key:bk, fromLat:locFrom.lat, fromLon:fromLon, toLat:bs.la, toLon:bs.lo});
+        // Use live GPS position if available, otherwise fall back to search origin
+        const fromLat0 = (curLat && curLon) ? curLat : locFrom.lat;
+        const fromLon0 = (curLat && curLon) ? curLon : locFrom.lon;
+        const ewOffset = Math.abs(fromLon0 - bs.lo) * 111320 * Math.cos(fromLat0 * Math.PI / 180);
+        const fromLon = ewOffset < 0.4 ? bs.lo : fromLon0;
+        const bk = `${fromLat0},${fromLon}|${bs.la},${bs.lo}`;
+        legsToFetch.push({key:bk, fromLat:fromLat0, fromLon:fromLon, toLat:bs.la, toLon:bs.lo});
         cardLegs[c.id] = cardLegs[c.id] || {};
         cardLegs[c.id].boardKey = bk;
         cardLegs[c.id].boardStop = bs;
@@ -1769,9 +1782,13 @@ function planRoute(){
   // Run in next tick so loading message renders
   setTimeout(()=>{
     const spd = SPEED[curV];
-    const fromMap = stopDistMap(locFrom.lat, locFrom.lon, rideRadius);
-    const toMap   = stopDistMap(locTo.lat,   locTo.lon,   rideRadius);
-    const totalDirect = dist(locFrom.lat, locFrom.lon, locTo.lat, locTo.lon);
+    // Use live GPS position for board stop selection if available
+    // This ensures the closest stop is to WHERE YOU ARE, not where you searched from
+    const fromLat = (curLat && curLon) ? curLat : locFrom.lat;
+    const fromLon = (curLat && curLon) ? curLon : locFrom.lon;
+    const fromMap = stopDistMap(fromLat, fromLon, rideRadius);
+    const toMap   = stopDistMap(locTo.lat, locTo.lon, rideRadius);
+    const totalDirect = dist(fromLat, fromLon, locTo.lat, locTo.lon);
 
     const directs   = findBestRoutes(fromMap, toMap);
     const transfers = findTransferRoutes(fromMap, toMap);
@@ -1968,6 +1985,8 @@ function planRoute(){
 
     // Async: refine with real OSRM street distances for top results
     refineWithOSRM(cards.filter(c => c.id !== 'ride').slice(0,3).concat(cards.filter(c=>c.id==='ride')));
+    // Refine board stop selection using real street distances
+    refineWithStreetDistance(cards.filter(c => c.id !== 'ride' && c.boardId));
   }, 50);
 }
 
@@ -2107,28 +2126,28 @@ function drawRouteOnMap(card) {
       bounds.push([s.la, s.lo]);
     }
 
-    // Draw stops BEFORE the board stop — dimmer, smaller dots
-    // These are stops the rider could skate to instead (earlier on the route)
-    // Show up to 5 stops before board stop, within ride radius
-    const rideRadiusKm = rideRadius;
-    for (let i = fromIdx - 1; i >= Math.max(0, fromIdx - 8); i--) {
+    // Draw stops BEFORE the board stop — alternate stops rider could target
+    // Show all stops within ride radius with distance from origin
+    for (let i = fromIdx - 1; i >= 0; i--) {
       const s = stopById[seq[i]];
       if (!s) continue;
-      // Only show if within ride radius of origin
+      // Stop showing when outside ride radius
       if (locFrom) {
-        const d = dist(locFrom.lat, locFrom.lon, s.la, s.lo);
-        if (d > rideRadiusKm) break; // stops getting farther
+        const fromLa = (curLat && curLon) ? curLat : locFrom?.lat;
+        const fromLo = (curLat && curLon) ? curLon : locFrom?.lon;
+        if (!fromLa) continue;
+        const d = dist(fromLa, fromLo, s.la, s.lo);
+        if (d > rideRadius * 1.1) break;
+        const marker = addToMap(L.circleMarker([s.la, s.lo], {
+          radius: 5, color: '#141416', fillColor: color,
+          fillOpacity: 0.5, weight: 1.5
+        }));
+        marker.bindPopup(
+          '<b>' + s.n + '</b>' +
+          '<br><span style="font-size:11px;color:#4dd4a0">🛹 ' + dkm(d) + ' from you — board here for longer ride</span>'
+        );
+        bounds.push([s.la, s.lo]);
       }
-      const marker = addToMap(L.circleMarker([s.la, s.lo], {
-        radius: 4, color: '#141416', fillColor: color,
-        fillOpacity: 0.4, weight: 1, dashArray: '2,2'
-      }));
-      marker.bindPopup(
-        '<b>' + s.n + '</b>' +
-        '<br><span style="font-size:11px;color:#4dd4a0">Earlier stop — board here to ride longer</span>' +
-        (locFrom ? '<br><span style="font-size:11px;color:#888">' +
-          dkm(dist(locFrom.lat, locFrom.lon, s.la, s.lo)) + ' from your location</span>' : '')
-      );
     }
   }
 
@@ -2255,8 +2274,9 @@ function drawRouteOnMap(card) {
   const alightStop = stopById[card.alightId];
 
   if (boardStop) {
+    const fromPt = (curLat && curLon) ? [curLat, curLon] : [locFrom.lat, locFrom.lon];
     drawRideLeg(card._boardGeometry, card._boardDistKm || 0,
-      [locFrom.lat, locFrom.lon], [boardStop.la, boardStop.lo]);
+      fromPt, [boardStop.la, boardStop.lo]);
   }
   if (alightStop) {
     drawRideLeg(card._alightGeometry, card._alightDistKm || 0,
@@ -2268,12 +2288,13 @@ function drawRouteOnMap(card) {
     bounds.push(...pts.filter((_,i) => i % 5 === 0));
   }
 
-  // Origin pin
-  if (locFrom) {
-    addToMap(L.marker([locFrom.lat, locFrom.lon], {icon: mkIcon('📍', '#1D9E75'), zIndexOffset: 300})
-      )
-      .bindPopup('<b>Start</b><br>' + locFrom.label);
-    bounds.push([locFrom.lat, locFrom.lon]);
+  // Origin pin — use live position if available
+  const pinLat = (curLat && curLon) ? curLat : locFrom?.lat;
+  const pinLon = (curLat && curLon) ? curLon : locFrom?.lon;
+  if (pinLat && pinLon) {
+    addToMap(L.marker([pinLat, pinLon], {icon: mkIcon('📍', '#1D9E75'), zIndexOffset: 300}))
+      .bindPopup('<b>You are here</b>');
+    bounds.push([pinLat, pinLon]);
   }
 
   // Destination pin
@@ -3496,6 +3517,109 @@ function updateCardAlerts(card, el) {
   const tagsEl = el.querySelector('.tags');
   if (tagsEl) {
     tagsEl.insertAdjacentHTML('afterend', alertBannerHtml(alerts));
+  }
+}
+
+
+// ── Street-distance board stop selection ─────────────────────────────────
+// After initial routing picks board stops by straight-line radius,
+// this refines each card's board stop by fetching real street distances
+// to the top 5 candidates in parallel and picking the shortest.
+
+async function refineWithStreetDistance(cards) {
+  if (!locFrom && !curLat) return;
+  const fromLat = curLat || locFrom.lat;
+  const fromLon = curLon || locFrom.lon;
+
+  const promises = cards
+    .filter(c => c.id !== 'ride' && c.boardId)
+    .map(async card => {
+      const rid = card.rid || card.r1id;
+      const did = card.did || card.did1;
+      if (!rid || !did) return;
+
+      const seq = (GTFS.route_stops_bi[rid] || {})[did] || [];
+      const boardIdx = card.boardIdx;
+      if (boardIdx == null) return;
+
+      // Gather top 5 candidates near current board stop index (±6 stops)
+      const candidates = [];
+      for (let i = Math.max(0, boardIdx - 6); i <= Math.min(seq.length-1, boardIdx + 2); i++) {
+        const s = stopById[seq[i]];
+        if (!s) continue;
+        const slDist = dist(fromLat, fromLon, s.la, s.lo);
+        if (slDist > rideRadius * 1.1) continue;
+        candidates.push({s, i, slDist});
+      }
+      if (candidates.length < 2) return; // no ambiguity, keep as-is
+
+      // Sort by straight-line, take top 5
+      candidates.sort((a, b) => a.slDist - b.slDist);
+      const top5 = candidates.slice(0, 5);
+
+      // Fetch OSRM for all in parallel
+      const profile = osrmProfile(curV);
+      const results = await Promise.all(top5.map(async ({s, i}) => {
+        try {
+          const url = `${OSRM}/${profile}/${fromLon},${fromLat};${s.lo},${s.la}?overview=false`;
+          const r = await fetch(url);
+          if (!r.ok) return null;
+          const d = await r.json();
+          const route = d.routes?.[0];
+          if (!route) return null;
+          return {s, i, streetKm: route.distance / 1000, streetMin: route.duration / 60};
+        } catch(e) { return null; }
+      }));
+
+      const valid = results.filter(Boolean);
+      if (!valid.length) return;
+
+      // Pick stop with shortest street distance
+      valid.sort((a, b) => a.streetKm - b.streetKm);
+      const winner = valid[0];
+
+      if (winner.s.id === card.boardId) return; // already correct
+
+      // Update card with better board stop
+      const oldBoard = stopById[card.boardId];
+      const newBoard = winner.s;
+      console.log(`Board stop refined: ${oldBoard?.n} → ${newBoard.n} (${(winner.streetKm*0.621).toFixed(2)}mi by street)`);
+
+      card.boardId = newBoard.id;
+      card.boardIdx = winner.i;
+      card.rdBoard = winner.streetKm;
+
+      // Update step title
+      if (card.steps?.[0]?.type === 'ride') {
+        card.steps[0].title = 'Ride ' + dkm(winner.streetKm) + ' to ' + newBoard.n;
+        card.steps[0].targetLat = newBoard.la;
+        card.steps[0].targetLon = newBoard.lo;
+      }
+
+      // Update board stop in wait/bus steps
+      card.steps?.forEach(step => {
+        if (step.type === 'wait') step.detail = 'At ' + newBoard.n;
+        if (step.type === 'bus') step.title = step.title.replace(/Board Route .* — /, 'Board Route ' + (card.route?.short || rid) + ' — ');
+      });
+
+      card.sub = card.sub; // trigger re-render
+    });
+
+  await Promise.all(promises);
+
+  // Re-render cards with updated board stops
+  const updated = document.getElementById('results');
+  if (updated) {
+    updated.innerHTML = updated.innerHTML; // force re-paint
+    // Actually re-render properly
+    const schedBadge = scheduleLoaded && STOP_SCHEDULE
+      ? ' &bull; <span style="color:#1D9E75;font-size:10px">&#x1F550; real schedules</span>'
+      : '';
+    updated.innerHTML =
+      '<div class="res-label">' + plannedCards.length + ' options — ' +
+      Object.keys(stopDistMap(curLat||locFrom.lat, curLon||locFrom.lon, rideRadius)).length +
+      ' stops in ride radius' + schedBadge + '</div>' +
+      plannedCards.map(renderCard).join('');
   }
 }
 
