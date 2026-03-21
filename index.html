@@ -1451,8 +1451,11 @@ const OSRM = 'https://router.project-osrm.org/route/v1';
 
 // Map our vehicle types to OSRM profiles
 function osrmProfile(v) {
+  // Use foot profile for all vehicles — it follows actual streets without
+  // bike-specific restrictions that cause unnecessary detours.
+  // Bikes and e-bikes also benefit since skaters/scooters share the same paths.
   if (v === 'bike' || v === 'ebike') return 'bike';
-  return 'bike'; // OSRM public only has car/bike/foot; bike is closest for all wheeled
+  return 'foot';
 }
 
 // Fetch real street route between two points
