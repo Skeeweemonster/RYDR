@@ -548,13 +548,13 @@ const BUSTIME_URL_DIRECT = 'https://realtime.ridemcts.com/bustime/api/v3';
 // Wrap BusTime calls through CORS proxy since ridemcts.com blocks GitHub Pages
 function bustimeUrl(endpoint, params) {
   const url = BUSTIME_URL_DIRECT + '/' + endpoint + '?' + params + '&format=json';
-  return 'https://api.allorigins.win/get?url=' + encodeURIComponent(url);
+  return 'https://corsproxy.io/?' + encodeURIComponent(url);
 }
 async function bustimeFetch(endpoint, params) {
   try {
     const r = await fetch(bustimeUrl(endpoint, params));
-    const wrapper = await r.json();
-    return JSON.parse(wrapper.contents);
+    if (!r.ok) return null;
+    return await r.json();
   } catch(e) { return null; }
 }
 const BUSTIME_URL = BUSTIME_URL_DIRECT; // keep for compatibility
@@ -757,6 +757,7 @@ let scheduleLoaded = false;
 let STOP_SCHEDULE = null;
 let alertsLoaded = false;
 let alertsLastFetch = 0;
+const ALERTS_TTL = 10 * 60 * 1000;
 let curLat=null, curLon=null; // continuously updated GPS position
 let openCards={}, plannedCards=[];
 let acTimer={from:null,to:null}, acData={from:[],to:[]}, acIdx={from:-1,to:-1};
@@ -1350,7 +1351,7 @@ async function addElevationToCards(cards) {
   if (!locFrom || !locTo) return; // GPS not ready
   // Collect all unique points we need elevation for
   const pointMap = {}; // key -> {lat,lon}
-  const key = (lat, lon) => lat.toFixed(4) + ',' + lon.toFixed(4);
+  const key = (lat, lon) => (+(lat||0)).toFixed(4) + ',' + (+(lon||0)).toFixed(4);
 
   const addPt = (lat, lon) => { if (lat && lon) pointMap[key(lat,lon)] = {lat,lon}; };
 
@@ -1372,7 +1373,7 @@ async function addElevationToCards(cards) {
   const elevCache = {};
   pts.forEach((p, i) => { elevCache[key(p.lat, p.lon)] = elevs[i]; });
 
-  const getElev = (lat, lon) => elevCache[key(lat.toFixed(4), lon.toFixed(4))];
+  const getElev = (lat, lon) => (lat != null && lon != null) ? elevCache[key((+lat).toFixed(4), (+lon).toFixed(4))] : null;
 
   // Apply to each card
   let anyUpdated = false;
@@ -3437,8 +3438,6 @@ function escHtml(s) {
 
 // ── Service alerts & detours ──────────────────────────────────────────────
 let SERVICE_ALERTS = {};   // routeId -> [{title, detail, type}]
-// alertsLoaded and alertsLastFetch moved to globals
-const ALERTS_TTL = 10 * 60 * 1000; // refresh every 10 min
 
 async function loadServiceAlerts() {
   if (Date.now() - alertsLastFetch < ALERTS_TTL) return;
@@ -3550,9 +3549,10 @@ async function pickBestBoardStops(cards) {
   await Promise.all(cards
     .filter(c => c.id !== 'ride' && c.boardId)
     .map(async card => {
+      try {
       const rid = card.rid || card.r1id;
       const did = card.did || card.did1;
-      if (!rid || !did) return;
+      if (!rid || !did) { console.log('pickBest: no rid/did for', card.id); return; }
 
       const seq = (GTFS.route_stops_bi[rid] || {})[did] || [];
       const boardIdx = card.boardIdx;
@@ -3615,6 +3615,7 @@ async function pickBestBoardStops(cards) {
           step.title = 'Board Route ' + (card.route?.short || card.r1?.short || rid) + ' — ' + (card.route?.long || card.r1?.long || '');
         }
       });
+      } catch(e) { console.error('pickBest error for card', card.id, ':', e.message); }
     }));
 }
 
