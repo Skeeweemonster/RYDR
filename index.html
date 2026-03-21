@@ -3561,6 +3561,8 @@ async function pickBestBoardStops(cards) {
         if (slDist > rideRadius * 1.2) continue;
         candidates.push({s, i, slDist});
       }
+      console.log(`pickBestBoardStops: card ${card.id}, route ${rid}, current board: ${stopById[card.boardId]?.n} (idx ${boardIdx}), ${candidates.length} candidates`);
+      candidates.forEach(c => console.log(`  candidate: ${c.s.n} sl=${(c.slDist*0.621).toFixed(2)}mi`));
       if (candidates.length < 2) return;
 
       // Fetch OSRM for all candidates in parallel
@@ -3572,8 +3574,10 @@ async function pickBestBoardStops(cards) {
           const d = await r.json();
           const route = d.routes?.[0];
           if (!route) return null;
-          return {s, i, streetKm: route.distance / 1000};
-        } catch(e) { return null; }
+          const km = route.distance / 1000;
+          console.log(`  OSRM ${s.n}: ${(km*0.621).toFixed(2)}mi by street`);
+          return {s, i, streetKm: km};
+        } catch(e) { console.warn(`  OSRM error for ${s.n}:`, e); return null; }
       }));
 
       const valid = results.filter(Boolean);
@@ -3584,7 +3588,8 @@ async function pickBestBoardStops(cards) {
       const winner = valid[0];
       if (winner.s.id === card.boardId) return; // already correct
 
-      console.log(`Board: ${stopById[card.boardId]?.n} → ${winner.s.n} (${(winner.streetKm*0.621).toFixed(2)}mi street)`);
+      console.log(`Board stop refined: ${stopById[card.boardId]?.n} → ${winner.s.n}`);
+      console.log(`  Old: ${(results.find(r=>r&&r.s.id===card.boardId)?.streetKm*0.621||0).toFixed(2)}mi, New: ${(winner.streetKm*0.621).toFixed(2)}mi`);
 
       // Update card
       card.boardId = winner.s.id;
