@@ -796,9 +796,13 @@ function dist(la1,lo1,la2,lo2){
 // Build stop distance maps for a location
 function stopDistMap(lat, lon, maxKm) {
   const map = {};
+  const lonScale = Math.cos(lat * Math.PI / 180);
   for (const s of GTFS.stops) {
-    const d = dist(lat, lon, s.la, s.lo);
-    if (d <= maxKm) map[s.id] = d;
+    const haversine = dist(lat, lon, s.la, s.lo);
+    if (haversine > maxKm) continue; // still use haversine for radius filter
+    // Manhattan distance for scoring — matches real street travel on a grid
+    const manhattan = (Math.abs(s.la - lat) + Math.abs((s.lo - lon) * lonScale)) * 111.0;
+    map[s.id] = manhattan;
   }
   return map;
 }
@@ -1022,20 +1026,43 @@ function findBestRoutes(fromMap, toMap) {
       // Board at the closest stop to origin, alight at the closest stop to destination.
       // The bus does maximum work; we ride the minimum.
 
-      // Board stops: sort purely by straight-line distance from current position.
-      // A→B is solved independently — we just want the closest stop on this route.
-      // pickBestBoardStops will then use real OSRM street distances to confirm.
+      // Score board stops by how far you'd actually travel to reach them.
+      // Uses cross-track geometry: project each stop onto your travel direction,
+      // then score = along-track distance (how far ahead it is on your path).
+      // This picks the FIRST stop you encounter naturally heading toward your dest,
+      // not the one that happens to be closest as the crow flies.
       const fromLat0 = curLat || locFrom.lat;
       const fromLon0 = curLon || locFrom.lon;
 
-      // Recompute distances from live position if available
-      if (curLat && curLon) {
-        for (let k = 0; k < boards.length; k++) {
-          const s = stopById[boards[k][2]];
-          if (s) boards[k] = [dist(curLat, curLon, s.la, s.lo), boards[k][1], boards[k][2]];
-        }
-      }
-      boards.sort((a, b) => a[0] - b[0]);
+      // Travel direction vector (from position toward destination)
+      const dxTravel = locTo.lon - fromLon0;
+      const dyTravel = locTo.lat - fromLat0;
+      const lenTravel = Math.sqrt(dxTravel*dxTravel + dyTravel*dyTravel) || 1;
+      const ux = dxTravel / lenTravel;  // unit vector toward dest
+      const uy = dyTravel / lenTravel;
+
+      boards.sort((a, b) => {
+        const sa = stopById[a[2]], sb = stopById[b[2]];
+        if (!sa || !sb) return a[0] - b[0];
+
+        // Vector from current position to each stop
+        const axS = sa.lo - fromLon0, ayS = sa.la - fromLat0;
+        const bxS = sb.lo - fromLon0, byS = sb.la - fromLat0;
+
+        // Along-track distance: how far ahead the stop is on your travel path
+        const aAlong = axS * ux + ayS * uy;
+        const bAlong = bxS * ux + byS * uy;
+
+        // Cross-track distance: how far off your path the stop is (lateral detour)
+        const aCross = Math.abs(axS * uy - ayS * ux);
+        const bCross = Math.abs(bxS * uy - byS * ux);
+
+        // Score = straight-line distance + heavy penalty for cross-track detour
+        // A stop directly ahead scores much better than one requiring a detour
+        const aScore = a[0] + aCross * 2.0;
+        const bScore = b[0] + bCross * 2.0;
+        return aScore - bScore;
+      });
       alights.sort((a, b) => a[0] - b[0]);
 
       let best = null;
@@ -1987,9 +2014,8 @@ function planRoute(){
       recordTrip(locFrom.label, locFrom.lat, locFrom.lon, locTo.label, locTo.lat, locTo.lon);
     }
 
-    // Pick best board stops using real street distances BEFORE rendering
-    // so the map shows the right stop from the start, no flicker
-    await pickBestBoardStops(cards.filter(c => c.id !== 'ride'));
+    // Board stops are already selected by closest straight-line from current position
+    // No external API needed - the lateral penalty in findBestRoutes handles direction
 
     const schedBadge = scheduleLoaded && STOP_SCHEDULE
       ? ' &bull; <span style="color:#1D9E75;font-size:10px">&#x1F550; real schedules</span>'
@@ -3528,98 +3554,58 @@ function updateCardAlerts(card, el) {
 // pick the one with shortest actual street route from current position.
 // Returns a map of cardId -> winning stop, applied before first render.
 
-async function pickBestBoardStops(cards) {
-  if (!locFrom && !curLat) return;
-  const fromLat = (curLat != null) ? curLat : locFrom.lat;
-  const fromLon = (curLon != null) ? curLon : locFrom.lon;
-  const profile = osrmProfile(curV);
-  console.log('pickBestBoardStops: using position', fromLat.toFixed(4), fromLon.toFixed(4));
+function pickBestBoardStops(cards) {
+  // Use Manhattan distance (grid distance) — no API calls needed.
+  // |Δlat| + |Δlon*cos(lat)| matches real street travel on Milwaukee's grid.
+  const fromLat = (curLat != null) ? curLat : locFrom?.lat;
+  const fromLon = (curLon != null) ? curLon : locFrom?.lon;
+  if (!fromLat || !fromLon) return;
 
-  await Promise.all(cards
-    .filter(c => c.id !== 'ride' && c.boardId)
-    .map(async card => {
-      try {
+  const lonScale = Math.cos(fromLat * Math.PI / 180);
+
+  cards.filter(c => c.id !== 'ride' && c.boardId).forEach(card => {
+    try {
       const rid = card.liveRouteId || card.r1id;
       const did = card.did || card.did1;
-      // Find the right direction if did not set
       const didToUse = did || Object.keys((GTFS.route_stops_bi[rid] || {})).find(d =>
         (GTFS.route_stops_bi[rid][d] || []).includes(card.boardId)
       );
-      if (!rid || !didToUse) { console.log('pickBest: no rid/did for', card.id, 'rid='+rid); return; }
+      if (!rid || !didToUse) return;
 
       const seq = (GTFS.route_stops_bi[rid] || {})[didToUse] || [];
       const boardIdx = card.boardIdx != null ? card.boardIdx : seq.indexOf(card.boardId);
-      if (boardIdx === -1 || boardIdx == null) { console.log('pickBest: boardIdx not found for', card.id); return; }
+      if (boardIdx < 0) return;
 
-      // Candidates: stops within ±5 sequence positions of chosen board stop
-      // that are within ride radius
-      const candidates = [];
-      for (let i = Math.max(0, boardIdx - 3); i <= Math.min(seq.length-1, boardIdx + 1); i++) {
+      let best = null;
+      for (let i = Math.max(0, boardIdx - 4); i <= Math.min(seq.length-1, boardIdx + 1); i++) {
         const s = stopById[seq[i]];
         if (!s) continue;
         const slDist = dist(fromLat, fromLon, s.la, s.lo);
         if (slDist > rideRadius * 1.2) continue;
-        candidates.push({s, i, slDist});
-      }
-      console.log(`pickBestBoardStops: card ${card.id}, route ${rid}, current board: ${stopById[card.boardId]?.n} (idx ${boardIdx}), ${candidates.length} candidates`);
-      candidates.forEach(c => console.log(`  candidate: ${c.s.n} sl=${(c.slDist*0.621).toFixed(2)}mi`));
-      if (candidates.length < 2) return;
-
-      // Fetch OSRM sequentially for top 3 candidates to avoid rate limiting
-      // Sequential is slightly slower but far more reliable on public OSRM
-      candidates.sort((a, b) => a.slDist - b.slDist);
-      const top3 = candidates.slice(0, 3);
-      const results = [];
-      for (const {s, i} of top3) {
-        try {
-          const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), 4000); // 4s timeout
-          const url = `${OSRM}/${profile}/${fromLon},${fromLat};${s.lo},${s.la}?overview=false`;
-          const r = await fetch(url, {signal: controller.signal});
-          clearTimeout(timeout);
-          if (!r.ok) { results.push(null); continue; }
-          const d = await r.json();
-          const route = d.routes?.[0];
-          if (!route) { results.push(null); continue; }
-          const km = route.distance / 1000;
-          console.log(`  OSRM ${s.n}: ${(km*0.621).toFixed(2)}mi by street`);
-          results.push({s, i, streetKm: km});
-        } catch(e) {
-          console.warn(`  OSRM timeout/error for ${s.n} - skipping`);
-          results.push(null);
+        const manhattan = Math.abs(s.la - fromLat) + Math.abs((s.lo - fromLon) * lonScale);
+        if (!best || manhattan < best.manhattan) {
+          best = {s, i, manhattan, slDist};
         }
       }
 
-      const valid = results.filter(Boolean);
-      if (!valid.length) return;
+      if (!best || best.s.id === card.boardId) return;
 
-      // Winner = shortest street distance
-      valid.sort((a, b) => a.streetKm - b.streetKm);
-      const winner = valid[0];
-      if (winner.s.id === card.boardId) return; // already correct
+      console.log('Board: ' + stopById[card.boardId]?.n + ' → ' + best.s.n + ' (Manhattan)');
 
-      console.log(`Board stop refined: ${stopById[card.boardId]?.n} → ${winner.s.n}`);
-      console.log(`  Old: ${(results.find(r=>r&&r.s.id===card.boardId)?.streetKm*0.621||0).toFixed(2)}mi, New: ${(winner.streetKm*0.621).toFixed(2)}mi`);
-
-      // Update card
-      card.boardId = winner.s.id;
-      card.boardIdx = winner.i;
-      card.rdBoard = winner.streetKm;
+      card.boardId = best.s.id;
+      card.boardIdx = best.i;
+      card.rdBoard = best.slDist;
 
       if (card.steps?.[0]?.type === 'ride') {
-        card.steps[0].title = 'Ride ' + dkm(winner.streetKm) + ' to ' + winner.s.n;
-        card.steps[0].targetLat = winner.s.la;
-        card.steps[0].targetLon = winner.s.lo;
-        card.steps[0].detail = card.steps[0].detail; // preserve
+        card.steps[0].title = 'Ride ' + dkm(best.slDist) + ' to ' + best.s.n;
+        card.steps[0].targetLat = best.s.la;
+        card.steps[0].targetLon = best.s.lo;
       }
       card.steps?.forEach(step => {
-        if (step.type === 'wait') step.detail = 'At ' + winner.s.n;
-        if (step.type === 'bus') {
-          step.title = 'Board Route ' + (card.route?.short || card.r1?.short || rid) + ' — ' + (card.route?.long || card.r1?.long || '');
-        }
+        if (step.type === 'wait') step.detail = 'At ' + best.s.n;
       });
-      } catch(e) { console.error('pickBest error for card', card.id, ':', e.message); }
-    }));
+    } catch(e) { console.error('pickBest error:', e.message); }
+  });
 }
 
 </script>
