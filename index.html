@@ -1071,7 +1071,8 @@ function findBestRoutes(fromMap, toMap) {
         if (!boardStop) continue;
         const boardDistToDest = dist(boardStop.la, boardStop.lo, locTo.lat, locTo.lon);
 
-        // Find closest alight to dest that is after board and moves bus toward dest
+        // Find closest alight to dest that is after board and moves toward dest.
+        // The distance check alone guarantees progress — no direction check needed.
         let bestAlight = null;
         for (const [rdA, ai_idx, asid] of alights) {
           if (ai_idx <= bi_idx) continue;
@@ -1080,7 +1081,7 @@ function findBestRoutes(fromMap, toMap) {
           const alightDistToDest = dist(alightStop.la, alightStop.lo, locTo.lat, locTo.lon);
           if (alightDistToDest >= boardDistToDest - 0.3) continue;
           bestAlight = [rdA, ai_idx, asid];
-          break; // first valid = closest to dest (already sorted)
+          break;
         }
         if (!bestAlight) continue;
 
@@ -1560,10 +1561,12 @@ async function refineWithOSRM(cards) {
         // Use live GPS position if available, otherwise fall back to search origin
         const fromLat0 = (curLat && curLon) ? curLat : locFrom.lat;
         const fromLon0 = (curLat && curLon) ? curLon : locFrom.lon;
+        // Snap origin to board stop longitude when on the same street (within 600m east-west)
+        // This prevents OSRM from routing sideways when user is already aligned north-south
         const ewOffset = Math.abs(fromLon0 - bs.lo) * 111320 * Math.cos(fromLat0 * Math.PI / 180);
-        const fromLon = ewOffset < 0.4 ? bs.lo : fromLon0;
-        const bk = `${fromLat0},${fromLon}|${bs.la},${bs.lo}`;
-        legsToFetch.push({key:bk, fromLat:fromLat0, fromLon:fromLon, toLat:bs.la, toLon:bs.lo});
+        const snapLon = ewOffset < 0.6 ? bs.lo : fromLon0;
+        const bk = `${fromLat0},${snapLon}|${bs.la},${bs.lo}`;
+        legsToFetch.push({key:bk, fromLat:fromLat0, fromLon:snapLon, toLat:bs.la, toLon:bs.lo});
         cardLegs[c.id] = cardLegs[c.id] || {};
         cardLegs[c.id].boardKey = bk;
         cardLegs[c.id].boardStop = bs;
