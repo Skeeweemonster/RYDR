@@ -1071,8 +1071,9 @@ function findBestRoutes(fromMap, toMap) {
         if (!boardStop) continue;
         const boardDistToDest = dist(boardStop.la, boardStop.lo, locTo.lat, locTo.lon);
 
-        // Find closest alight to dest that is after board and moves toward dest.
-        // The distance check alone guarantees progress — no direction check needed.
+        // Find the alight stop that minimizes rdAlight (ride from stop to dest).
+        // Scan ALL valid alights after the board stop and pick the closest to dest.
+        // Don't break early — a later sequence stop may be closer to the destination.
         let bestAlight = null;
         for (const [rdA, ai_idx, asid] of alights) {
           if (ai_idx <= bi_idx) continue;
@@ -1080,8 +1081,7 @@ function findBestRoutes(fromMap, toMap) {
           if (!alightStop) continue;
           const alightDistToDest = dist(alightStop.la, alightStop.lo, locTo.lat, locTo.lon);
           if (alightDistToDest >= boardDistToDest - 0.3) continue;
-          bestAlight = [rdA, ai_idx, asid];
-          break;
+          if (!bestAlight || rdA < bestAlight[0]) bestAlight = [rdA, ai_idx, asid];
         }
         if (!bestAlight) continue;
 
