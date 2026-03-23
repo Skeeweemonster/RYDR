@@ -1852,7 +1852,7 @@ function startNavigation() {
     leafletMap.panTo([lat,lon],{animate:true,duration:.5});
     liveNavUpdate(lat,lon,speed);
     navLastLat=lat; navLastLon=lon;
-  },()={},{enableHighAccuracy:true,maximumAge:3000,timeout:10000});
+  },()=>{},{enableHighAccuracy:true,maximumAge:3000,timeout:10000});
 }
 
 function stopNavigation() {
