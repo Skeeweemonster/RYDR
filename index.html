@@ -1518,9 +1518,15 @@ async function refineRideLegs(cards) {
       }
     }
 
-    // Re-render this card
+    // Re-render card in results list
     const el = document.getElementById('card-'+card.id);
     if (el) el.outerHTML = renderCard(card);
+
+    // If this card is currently open in map, redraw the map with street geometry
+    if (activeCard && activeCard.id === card.id && leafletMap) {
+      clearMapLayers();
+      drawRoute(card);
+    }
   }
 
   // Re-sort by updated mins
@@ -1690,13 +1696,15 @@ function drawRoute(card) {
   const rideCol = segColor(curV);
   const fromLat = curLat ?? locFrom.lat, fromLon = curLon ?? locFrom.lon;
 
-  function drawRideLeg(geom, fromPt, toPt, distKm) {
-    if (geom && distKm > 0.8) {
+  function drawRideLeg(geom, fromPt, toPt) {
+    if (geom && geom.length >= 2) {
+      // OSRM street geometry available — draw along actual streets
       const pts = geom.map(c => [c[1],c[0]]);
-      addToMap(L.polyline(pts, {color:rideCol, weight:4, opacity:.9, dashArray:'8,5'}));
-      bounds.push(...pts.filter((_,i)=>i%5===0));
+      addToMap(L.polyline(pts, {color:rideCol, weight:4, opacity:.9, dashArray:'8,5', lineJoin:'round'}));
+      bounds.push(...pts.filter((_,i)=>i%3===0));
     } else {
-      addToMap(L.polyline([fromPt,toPt], {color:rideCol, weight:4, opacity:.8, dashArray:'6,4'}));
+      // Fallback straight line while OSRM loads
+      addToMap(L.polyline([fromPt,toPt], {color:rideCol, weight:4, opacity:.6, dashArray:'6,4'}));
       bounds.push(fromPt, toPt);
     }
   }
@@ -1744,18 +1752,23 @@ function drawRoute(card) {
         .bindPopup('<b>'+s.n+'</b><br><span style="font-size:11px;color:#4dd4a0">Board here for longer ride</span>');
     }
 
-    // Draw route polyline (straight line between stop coords as fallback)
-    const bs2 = stopById[bid], as2 = stopById[aid];
-    if (bs2 && as2) {
-      addToMap(L.polyline([[bs2.la,bs2.lo],[as2.la,as2.lo]], {color,weight:5,opacity:.9}));
-      bounds.push([bs2.la,bs2.lo],[as2.la,as2.lo]);
+    // Draw route through all stops in sequence — follows the street grid
+    const lo = Math.min(fi,ti), hi = Math.max(fi,ti);
+    const routePts = [];
+    for (let i = lo; i <= hi; i++) {
+      const s = stopById[seq[i]];
+      if (s) routePts.push([s.la, s.lo]);
+    }
+    if (routePts.length >= 2) {
+      addToMap(L.polyline(routePts, {color, weight:5, opacity:.9, lineJoin:'round'}));
+      bounds.push(...routePts.filter((_,i)=>i%3===0));
     }
   }
 
   // Draw ride geometries
   const bs = stopById[card.boardId], as = stopById[card.alightId];
   if (bs) {
-    drawRideLeg(card._boardGeom, [fromLat,fromLon], [bs.la,bs.lo], card._boardDistKm||card.rdBoard);
+    drawRideLeg(card._boardGeom, [fromLat,fromLon], [bs.la,bs.lo]);
     addToMap(L.marker([bs.la,bs.lo], {icon:mkIcon('🚏','#1db974'),zIndexOffset:200})).bindPopup('<b>Board here</b><br>'+bs.n);
     bounds.push([bs.la,bs.lo]);
   }
@@ -1774,7 +1787,7 @@ function drawRoute(card) {
     }
   }
   if (as) {
-    drawRideLeg(card._alightGeom, [as.la,as.lo], [locTo.lat,locTo.lon], card._alightDistKm||card.rdAlight);
+    drawRideLeg(card._alightGeom, [as.la,as.lo], [locTo.lat,locTo.lon]);
     addToMap(L.marker([as.la,as.lo], {icon:mkIcon('🚏','#e84040'),zIndexOffset:200})).bindPopup('<b>Alight here</b><br>'+as.n);
     bounds.push([as.la,as.lo]);
   }
