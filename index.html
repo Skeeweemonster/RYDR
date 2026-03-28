@@ -1464,12 +1464,30 @@ async function osrmRoute(fLat, fLon, tLat, tLon) {
     if (!r.ok) return null;
     const d = await r.json();
     const route = d.routes?.[0];
-    return route ? {
-      distKm: route.distance / 1000,
+    if (!route) return null;
+    const distKm = route.distance / 1000;
+    // Reject U-turns: if OSRM path is >2.2x the straight-line distance, it's routing
+    // around something you wouldn't actually avoid on a skateboard — use L-shape instead
+    const straightKm = haversine(fLat, fLon, tLat, tLon);
+    if (distKm > straightKm * 2.2 && straightKm > 0.1) return null;
+    return {
+      distKm,
       durationMin: route.duration / 60,
       geom: route.geometry?.coordinates,
-    } : null;
+    };
   } catch(e) { return null; }
+}
+
+// Build an L-shaped path between two points (how you actually ride a grid city)
+// Goes: origin → corner → destination, picking the shorter L
+function lShapedPath(fLat, fLon, tLat, tLon) {
+  // Two possible corners: (fLat, tLon) or (tLat, fLon)
+  // Pick the one that avoids going backwards
+  const corner1 = [fLat, tLon]; // go east/west first, then north/south
+  const corner2 = [tLat, fLon]; // go north/south first, then east/west
+  // Use corner2 (north/south first) as default — better for Milwaukee's grid
+  // where major streets run N-S and stops are on E-W cross streets
+  return [[fLat, fLon], corner2, [tLat, tLon]];
 }
 
 async function refineRideLegs(cards) {
@@ -1698,13 +1716,14 @@ function drawRoute(card) {
 
   function drawRideLeg(geom, fromPt, toPt) {
     if (geom && geom.length >= 2) {
-      // OSRM street geometry available — draw along actual streets
+      // OSRM street geometry — draw along actual streets
       const pts = geom.map(c => [c[1],c[0]]);
       addToMap(L.polyline(pts, {color:rideCol, weight:4, opacity:.9, dashArray:'8,5', lineJoin:'round'}));
       bounds.push(...pts.filter((_,i)=>i%3===0));
     } else {
-      // Fallback straight line while OSRM loads
-      addToMap(L.polyline([fromPt,toPt], {color:rideCol, weight:4, opacity:.6, dashArray:'6,4'}));
+      // L-shaped fallback: north/south then east/west (grid-aware, no diagonals)
+      const pts = lShapedPath(fromPt[0], fromPt[1], toPt[0], toPt[1]);
+      addToMap(L.polyline(pts, {color:rideCol, weight:4, opacity:.8, dashArray:'8,5', lineJoin:'round'}));
       bounds.push(fromPt, toPt);
     }
   }
